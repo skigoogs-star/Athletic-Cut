@@ -621,6 +621,9 @@ svg{display:block}
 .btn--primary:active,.btn--ghost:active,.btn--outline:active{filter:brightness(.92)}
 .stepper{border:var(--hair);border-radius:var(--r-card);background:var(--surface)}
 .stepper .step-btn{background:var(--surface-ctrl);margin:8px;border-radius:var(--r-ctrl);border:0!important}
+/* the small steppers sit two to a row: thinner button margins and icons leave room for the number */
+.stepper--xs .step-btn{margin:5px}
+.stepper--xs .step-btn .ico{width:22px;height:22px}
 .chip{border-radius:var(--r-ctrl);background:var(--surface-ctrl)}
 .chip[aria-checked="true"],.chip[aria-pressed="true"]{box-shadow:inset 0 0 0 2px var(--primary-ink)}
 .rpe-row .chip[aria-checked="true"]{background:var(--primary);color:var(--on-primary);box-shadow:none}
@@ -5795,7 +5798,7 @@ AC.screens = (function () {
       wrap.appendChild(ui.stepper({ label: 'Bell', unit: 'kg', value: b.load, snap: true,
         stepUp: AC.engine.kbUp, stepDown: AC.engine.kbDown, min: 4, max: 60,
         onChange: function (v) { AC.engine.setBlockField('load', v); } }));
-      wrap.appendChild(h('div', { class: 'row' },
+      wrap.appendChild(h('div', { style: 'display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:var(--s-2)' },
         ui.stepper({ label: 'Minutes', value: b.minutes, step: 1, min: 1, max: 30, size: 'xs',
           onChange: function (v) { AC.engine.setBlockField('minutes', v); } }),
         ui.stepper({ label: 'Reps / min', value: b.repsPerMinute, step: 1, min: 1, max: 50, size: 'xs',
