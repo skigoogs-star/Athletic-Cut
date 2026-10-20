@@ -2,7 +2,7 @@
   "name": "Athletic Cut",
   "short_name": "Athletic Cut",
   "description": "Training program, timers and logging.",
-  "id": "./",
+  "id": "./?app=athletic-cut",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
