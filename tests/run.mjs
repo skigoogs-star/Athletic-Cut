@@ -2042,6 +2042,57 @@ console.log('\nV2-14  progress photos');
   await ctx.close();
 }
 
+console.log('\nV2-16  sprints: adjust between efforts, step back out and resume');
+{
+  const { ctx, page } = await newPage();
+  await page.clock.install();
+  await page.goto(BASE);
+  await tap(page, /Begin week 1/i);
+  await page.evaluate(() => { AC.engine.start('day-c'); AC.engine.nextBlock(); AC.router.go('session'); });
+  await page.waitForSelector('.runner');
+  await tap(page, /Start sprints/i);
+  await page.clock.runFor(11_000 + 21_000);
+  await page.waitForTimeout(30);
+  let s = await state(page);
+  eq('one effort run, now resting', [s.activeSession.entries.length, s.activeSession.block.status], [1, 'rest']);
+  ok('the rest screen offers the effort and rest counters',
+    (await page.getByRole('button', { name: /Decrease effort by 5 s/ }).count()) === 1 &&
+    (await page.getByRole('button', { name: /Decrease rest by 15 s/ }).count()) === 1);
+  await page.getByRole('button', { name: /Decrease effort by 5 s/ }).click();
+  await page.waitForTimeout(30);
+  eq('the effort drops from 20 to 15 s', (await state(page)).activeSession.block.effortSeconds, 15);
+  ok('and the line under the name follows', /^15 s · walk back/.test(await page.locator('.ex-head .ex-target').innerText()));
+  const before = (await state(page)).activeSession.timer.endAt;
+  await page.getByRole('button', { name: 'Add 30 seconds of rest' }).click();
+  await page.waitForTimeout(30);
+  eq('+30 s lengthens the walk-back rest', ((await state(page)).activeSession.timer.endAt - before) / 1000, 30);
+  await page.clock.runFor(90_000);
+  await page.waitForTimeout(30);
+  eq('so after 90 s it is still resting', (await state(page)).activeSession.block.status, 'rest');
+  await page.clock.runFor(31_000);
+  await page.waitForTimeout(30);
+  ok('between efforts the counters are still there',
+    (await page.getByRole('button', { name: /Increase effort by 5 s/ }).count()) === 1);
+  // Back out to the previous block, then come forward again.
+  await page.evaluate(() => AC.engine.back());
+  await page.waitForTimeout(30);
+  ok('Back leaves the sprints', !(await hdr()).includes('EFFORT'));
+  await page.evaluate(() => AC.engine.nextBlock());
+  await page.waitForTimeout(30);
+  s = await state(page);
+  eq('coming back resumes: effort 2 ready, 1 logged, still 15 s',
+    [s.activeSession.block.status, s.activeSession.block.effortIndex, s.activeSession.block.effortSeconds, s.activeSession.entries.length],
+    ['ready-effort', 1, 15, 1]);
+  await tap(page, /Start effort 2/i);
+  s = await state(page);
+  eq('effort 2 runs for 15 s', (s.activeSession.timer.endAt - s.activeSession.timer.startedAt) / 1000, 15);
+  await page.clock.runFor(16_000);
+  await page.waitForTimeout(30);
+  s = await state(page);
+  eq('both efforts logged, each with its own length', s.activeSession.entries.map(e => e.seconds), [20, 15]);
+  await ctx.close();
+}
+
 await browser.close();
 server.close();
 console.log('\n' + (fail ? '\x1b[31m' : '\x1b[32m') + pass + ' passed, ' + fail + ' failed\x1b[0m');

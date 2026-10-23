@@ -440,6 +440,9 @@ svg{display:block}
 .dial .arc{stroke:var(--rest);fill:none;stroke-linecap:round;
   transition:stroke var(--d-base) var(--ease-std)}
 .dial--work .arc{stroke:var(--primary-ink)}
+/* sprint rest: a smaller dial so the next-effort counters fit on one screen */
+.dial--compact{width:min(220px,58vw)}
+.dial--compact .dial-num,.dial--compact .dial-num.long{font-size:clamp(2.5rem,13vw,3.5rem)}
 .dial.is-final .arc{stroke:var(--primary-ink)}
 .dial-num{font-size:clamp(4rem,28vw,7rem);font-weight:800;line-height:var(--lh-num);
   font-variant-numeric:tabular-nums slashed-zero;letter-spacing:var(--tracking-num);
@@ -3956,8 +3959,22 @@ AC.engine = (function () {
       b.roundsCompleted = mine.length;
       if (mine[0].load) b.load = mine[0].load;
     } else if (b.mode === 'interval' && mine.length) {
-      b.status = 'finished';
+      /* Stepping back into sprints picks up where they left off: the efforts
+         already run stay logged and the next one is ready, with the seconds
+         and rest that were in use. */
+      var was = (aa.blockResults || []).filter(function (r) { return r.blockId === blk.id; })[0] ||
+        (aa.blockMemo || {})[blk.id];
       b.effortIndex = mine.length;
+      b.status = 'ready-effort';
+      var lastSecs = mine[mine.length - 1].seconds;
+      if (lastSecs) b.effortSeconds = lastSecs;
+      if (was) {
+        if (was.effortSeconds) b.effortSeconds = was.effortSeconds;
+        if (was.restSeconds) b.restSeconds = was.restSeconds;
+        if (was.effortsTarget) b.effortsTarget = was.effortsTarget;
+        if (was.slowerFlags) b.slower = was.slowerFlags.slice();
+      }
+      b.effortsTarget = Math.min(b.effortsMax, Math.max(b.effortsTarget, b.effortIndex));
     }
     return b;
   }
@@ -4298,6 +4315,8 @@ AC.engine = (function () {
       r.slowerFlags = (b.slower || []).slice();
       r.stoppedEarly = !!b.stoppedEarly;
       r.effortSeconds = b.effortSeconds;
+      r.restSeconds = b.restSeconds;
+      r.effortsTarget = b.effortsTarget;
     }
     if (b.mode === 'freeform') { r.minutes = b.minutes; r.activity = b.activity; }
     return r;
@@ -4349,6 +4368,13 @@ AC.engine = (function () {
     stopTimer();
     AC.store.update(function (s) {
       var aa = s.activeSession;
+      /* Remember what was set up in the block being left (sprint length, rest),
+         so coming forward again picks up with the same settings. */
+      var leaving = aa.blocks[aa.blockIndex];
+      if (leaving && aa.block && aa.block.mode === 'interval') {
+        aa.blockMemo = aa.blockMemo || {};
+        aa.blockMemo[leaving.id] = blockResult(leaving, aa.block);
+      }
       aa.blockIndex--;
       /* Rebuild before dropping the result — the checklist's ticks live in it. */
       aa.block = rebuildBlockState(aa, aa.blockIndex);
@@ -5849,17 +5875,27 @@ AC.screens = (function () {
     return wrap;
   }
 
+  /* Effort and rest length, adjustable before the first effort and between
+     efforts (a change applies from the next effort or rest on). */
+  function intervalTuning(b) {
+    /* Keep the "20 s · walk back · 90 s rest" line above in step with the counters. */
+    function retitle() {
+      var cur = S().activeSession.block, t = document.querySelector('.ex-head .ex-target');
+      if (t) t.textContent = cur.effortSeconds + ' s · walk back · ' + cur.restSeconds + ' s rest';
+    }
+    return h('div', { style: 'display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:var(--s-2)' },
+      ui.stepper({ label: 'Effort', unit: 's', value: b.effortSeconds, step: 5, min: 5, max: 60, size: 'xs',
+        onChange: function (v) { AC.engine.setBlockField('effortSeconds', v); retitle(); } }),
+      ui.stepper({ label: 'Rest', unit: 's', value: b.restSeconds, step: 15, min: 30, max: 300, size: 'xs',
+        onChange: function (v) { AC.engine.setBlockField('restSeconds', v); retitle(); } }));
+  }
   function intervalBlock(blk, b) {
     var wrap = h('div', { class: 'stack' });
     var slot = blk.items[0];
     wrap.appendChild(exHead(slot, b.effortSeconds + ' s · walk back · ' + b.restSeconds + ' s rest'));
     if (b.status === 'ready') {
       wrap.appendChild(h('div', { class: 'ex-note', text: blk.instructions }));
-      wrap.appendChild(h('div', { style: 'display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:var(--s-2)' },
-        ui.stepper({ label: 'Effort', unit: 's', value: b.effortSeconds, step: 5, min: 5, max: 60, size: 'xs',
-          onChange: function (v) { AC.engine.setBlockField('effortSeconds', v); } }),
-        ui.stepper({ label: 'Rest', unit: 's', value: b.restSeconds, step: 15, min: 30, max: 300, size: 'xs',
-          onChange: function (v) { AC.engine.setBlockField('restSeconds', v); } })));
+      wrap.appendChild(intervalTuning(b));
       wrap.appendChild(ui.stepper({ label: 'Efforts', value: b.effortsTarget, step: 1,
         min: 1, max: b.effortsMax, size: 'xs',
         onChange: function (v) { AC.engine.setBlockField('effortsTarget', v); } }));
@@ -5884,6 +5920,7 @@ AC.screens = (function () {
     var phase = b.status === 'effort' ? 'EFFORT' : b.status === 'getset' ? 'GET SET' : 'REST';
     var dl = dial({ label: 'Seconds left' });
     if (b.status === 'effort') dl.classList.add('dial--work');
+    if (b.status === 'rest' || b.status === 'ready-effort') dl.classList.add('dial--compact');
     refs.intervalDial = dl;
     wrap.appendChild(h('div', { class: 'cap', style: 'text-align:center;color:' +
       (b.status === 'effort' ? 'var(--primary-text)' : 'var(--rest-text)'), text: phase }));
@@ -5911,6 +5948,10 @@ AC.screens = (function () {
             ui.btn('One more', function () { AC.engine.addEffort(); }, 'ghost', { small: true }))));
       }
     }
+    if (b.status === 'rest' || b.status === 'ready-effort') {
+      wrap.appendChild(h('div', { class: 'cap', text: 'Adjust the next effort' }));
+      wrap.appendChild(intervalTuning(b));
+    }
     wrap.appendChild(h('div', { class: 'spacer' }));
     var band = h('div', { class: 'actions' });
     if (b.status === 'effort') {
@@ -5932,8 +5973,10 @@ AC.screens = (function () {
         ui.btn('Stop', function () { AC.engine.stopSprints(true); }, 'ghost'),
         ui.btn('Go now', function () { AC.engine.stopTimer(); AC.engine.startEffort(); }, 'primary')));
     } else {
-      band.appendChild(h('div', { class: 'btn-row' },
+      band.appendChild(h('div', { class: 'btn-row', style: 'display:grid;grid-template-columns:1fr 1fr 1.4fr;gap:var(--s-2)' },
         ui.btn('Stop', function () { AC.engine.stopSprints(true); }, 'ghost'),
+        ui.btn('+30 s', function () { AC.engine.extendTimer(S().settings.restExtendSeconds || 30); }, 'ghost',
+          { ariaLabel: 'Add 30 seconds of rest' }),
         ui.btn('Skip rest', function () {
           AC.engine.stopTimer();
           AC.engine.setBlockField('status', 'ready-effort');
