@@ -889,6 +889,23 @@ AC.util = (function () {
   function lbToKg(v) { return v / LB_PER_KG; }
   function kgToLb(v) { return v * LB_PER_KG; }
   function toLb(v, unit) { return unit === 'kg' ? kgToLb(v) : v; }
+  /* One unit for every weight on screen: Settings → Units. Each value is stored
+     with the unit it was entered in; these convert it for display. */
+  function prefUnit() {
+    try { return AC.store.get().settings.loadUnit === 'kg' ? 'kg' : 'lb'; } catch (e) { return 'lb'; }
+  }
+  function massTo(v, from, to) {
+    if (v === null || v === undefined || isNaN(v)) return v;
+    to = to || prefUnit(); from = from || 'lb';
+    return from === to ? v : to === 'kg' ? lbToKg(v) : kgToLb(v);
+  }
+  /* "61.2 kg" / "135 lb": whole numbers stay whole, converted values get one decimal. */
+  function mass(v, from, dp) {
+    var x = massTo(v, from);
+    if (x === null || x === undefined || isNaN(x)) return '—';
+    if (dp === undefined) dp = Math.abs(x - Math.round(x)) < 0.05 ? 0 : 1;
+    return num(x, dp) + ' ' + prefUnit();
+  }
   function mean(arr) {
     var v = arr.filter(function (x) { return typeof x === 'number' && !isNaN(x); });
     if (!v.length) return null;
@@ -946,7 +963,7 @@ AC.util = (function () {
     dayIndex: dayIndex, keyFromIndex: keyFromIndex, daysBetween: daysBetween, isoWeekKey: isoWeekKey, weekStart: weekStart,
     weekKeyOffset: weekKeyOffset, fmtDate: fmtDate, fmtDateLong: fmtDateLong,
     fmtClock: fmtClock, fmtMs: fmtMs, clamp: clamp, roundTo: roundTo, num: num,
-    lbToKg: lbToKg, kgToLb: kgToLb, toLb: toLb, mean: mean,
+    lbToKg: lbToKg, kgToLb: kgToLb, toLb: toLb, prefUnit: prefUnit, massTo: massTo, mass: mass, mean: mean,
     h: h, svgUse: svgUse, clear: clear, announce: announce,
     reduceMotion: reduceMotion, LB_PER_KG: LB_PER_KG
   };
@@ -2943,10 +2960,19 @@ AC.stats = (function () {
   }
 
   /* --- metrics --- */
+  /* Weigh-ins and scan masses come back in the unit chosen in Settings, whatever
+     unit they were logged in. */
+  var MASS_METRICS = { weight: 1, leanMass: 1, skeletalMuscleMass: 1, bodyFatMass: 1 };
+  function inPrefUnit(m) {
+    if (!MASS_METRICS[m.type]) return m;
+    var to = U.prefUnit(), from = m.unit === 'kg' ? 'kg' : 'lb';
+    if (from === to) return m;
+    return Object.assign({}, m, { value: Math.round(U.massTo(m.value, from, to) * 10) / 10, unit: to });
+  }
   function metricsOfType(type) {
     var byDate = {};
     S().metrics.forEach(function (m) { if (m.type === type) byDate[m.date] = m; });
-    return Object.keys(byDate).sort().map(function (k) { return byDate[k]; });
+    return Object.keys(byDate).sort().map(function (k) { return inPrefUnit(byDate[k]); });
   }
   function latest(type) {
     var m = metricsOfType(type);
@@ -2981,7 +3007,7 @@ AC.stats = (function () {
   function weekAverage(type, weekKey) {
     var vals = S().metrics.filter(function (m) {
       return m.type === type && U.isoWeekKey(m.date) === weekKey;
-    }).map(function (m) { return m.value; });
+    }).map(function (m) { return inPrefUnit(m).value; });
     return U.mean(vals);
   }
 
@@ -2993,11 +3019,18 @@ AC.stats = (function () {
       return U.isoWeekKey(sessionDay(s)) === wk;
     }).length;
   }
+  /* Loads are entered per dumbbell, and one-sided reps are per side, so volume
+     counts what both hands and both sides actually moved. */
+  var PAIRED = { 'dumbbell-bench-press': 1, 'chest-supported-row': 1, 'bulgarian-split-squat': 1 };
+  function loadMultiplier(ex) {
+    if (!ex) return 1;
+    return (PAIRED[ex.id] ? 2 : 1) * (ex.unilateral ? 2 : 1);
+  }
   function setVolume(set, bodyweightLb) {
     if (set.isWarmup) return 0;
     if (set.reps === null || set.reps === undefined) return 0;
     var ex = S().exercises[set.exerciseId];
-    var load = toLb(set.load || 0, set.loadUnit || 'lb');
+    var load = toLb(set.load || 0, set.loadUnit || 'lb') * loadMultiplier(ex);
     if (ex && (ex.id === 'weighted-pull-up' || ex.id === 'pull-up' || ex.id === 'dip')) {
       return ((bodyweightLb || 0) + load) * set.reps;
     }
@@ -3126,20 +3159,24 @@ AC.stats = (function () {
     var loss = a2 === null ? null : a2 - a1;
     var lossPrev = (a3 === null || a2 === null) ? null : a3 - a2;
     var r = { week: thisWeek, avg: a1, prevAvg: a2, loss: loss, tone: 'good', delta: 0 };
+    /* The averages come in the unit chosen in Settings; the program's targets are pounds per week. */
+    var pu = U.prefUnit();
+    var lb = function (v) { return v === null ? null : U.massTo(v, pu, 'lb'); };
+    var L = lb(loss), LP = lb(lossPrev);
     if (loss === null) {
-      r.text = 'First full week logged: ' + U.num(a1, 1) + ' lb average. Next week gives you a trend.';
-    } else if (loss > 1.5 && lossPrev !== null && lossPrev > 1.5) {
+      r.text = 'First full week logged: ' + U.num(a1, 1) + ' ' + pu + ' average. Next week gives you a trend.';
+    } else if (L > 1.5 && LP !== null && LP > 1.5) {
       r.tone = 'warn'; r.delta = 250;
-      r.text = 'Losing ' + U.num(loss, 1) + ' lb/week two weeks running. At your body fat that comes out of muscle. Eat more — add about 250 kcal/day.';
-    } else if (loss > 1.0) {
-      r.text = 'Down ' + U.num(loss, 1) + ' lb this week — slightly fast. Hold and watch one more week.';
-    } else if (loss >= 0.7) {
-      r.text = 'Down ' + U.num(loss, 1) + ' lb/week. On target. Hold at ' + U.num(st.settings.calorieTarget) + ' kcal.';
-    } else if (lossPrev !== null && loss < 0.2 && lossPrev < 0.2) {
+      r.text = 'Losing ' + U.num(loss, 1) + ' ' + pu + '/week two weeks running. At your body fat that comes out of muscle. Eat more — add about 250 kcal/day.';
+    } else if (L > 1.0) {
+      r.text = 'Down ' + U.num(loss, 1) + ' ' + pu + ' this week — slightly fast. Hold and watch one more week.';
+    } else if (L >= 0.7) {
+      r.text = 'Down ' + U.num(loss, 1) + ' ' + pu + '/week. On target. Hold at ' + U.num(st.settings.calorieTarget) + ' kcal.';
+    } else if (LP !== null && L < 0.2 && LP < 0.2) {
       r.tone = 'warn'; r.delta = -300;
       r.text = 'Nothing moved for two weeks. Drop 300 kcal/day.';
     } else {
-      r.text = 'Down ' + U.num(loss, 1) + ' lb this week — under target. Hold one more week before changing anything.';
+      r.text = 'Down ' + U.num(loss, 1) + ' ' + pu + ' this week — under target. Hold one more week before changing anything.';
     }
     if (anyLiftStalled()) {
       r.text += ' No main lift progressed for two weeks either — the program says add 200 kcal/day, not more training.';
@@ -3213,14 +3250,14 @@ AC.stats = (function () {
       var ex = S().exercises[id];
       var name = ex ? ex.name : id;
       var lb = function (e) { return toLb(e.load || 0, e.loadUnit || 'lb'); };
-      var unit = (mine[0] && mine[0].loadUnit) || 'lb';
-      var shown = function (e) { return e.load || 0; };
+      var unit = U.prefUnit();
+      var shown = function (e) { return U.massTo(e.load || 0, e.loadUnit || 'lb'); };
       /* load */
       var topNow = mine.reduce(function (b, e) { return !b || lb(e) > lb(b) ? e : b; }, null);
       var topPrev = Math.max.apply(null, before.map(lb));
       if (topNow && lb(topNow) > 0 && lb(topNow) > topPrev + 1e-9) {
         out.push({ exerciseId: id, name: name, kind: 'load', value: shown(topNow), unit: unit, reps: topNow.reps,
-          text: name + ' · heaviest load', detail: U.num(shown(topNow), shown(topNow) % 1 ? 1 : 0) + ' ' + unit + ' × ' + topNow.reps });
+          text: name + ' · heaviest load', detail: U.mass(topNow.load || 0, topNow.loadUnit) + ' × ' + topNow.reps });
       }
       /* reps: more reps than ever at this load or heavier */
       var repBest = null;
@@ -3232,7 +3269,7 @@ AC.stats = (function () {
       if (repBest) {
         var re = repBest.e;
         out.push({ exerciseId: id, name: name, kind: 'reps', value: re.reps, unit: 'reps', load: shown(re),
-          text: name + ' · most reps' + (lb(re) > 0 ? ' at ' + U.num(shown(re), shown(re) % 1 ? 1 : 0) + ' ' + unit : ''),
+          text: name + ' · most reps' + (lb(re) > 0 ? ' at ' + U.mass(re.load || 0, re.loadUnit) : ''),
           detail: re.reps + ' reps (was ' + repBest.prev + ')' });
       }
       /* estimated 1RM (Epley; main-lift style sets of 1-12 reps only) */
@@ -3240,8 +3277,8 @@ AC.stats = (function () {
       mine.forEach(function (e) { var v = setE1rm(e, bw); if (v !== null && (e1Now === null || v > e1Now)) e1Now = v; });
       before.forEach(function (e) { var v = setE1rm(e, e._bw); if (v !== null && (e1Prev === null || v > e1Prev)) e1Prev = v; });
       if (e1Now !== null && e1Prev !== null && e1Now > e1Prev + 0.5) {
-        out.push({ exerciseId: id, name: name, kind: 'e1rm', value: Math.round(e1Now), unit: 'lb',
-          text: name + ' · new e1RM', detail: U.num(Math.round(e1Now)) + ' lb (was ' + U.num(Math.round(e1Prev)) + ')' });
+        out.push({ exerciseId: id, name: name, kind: 'e1rm', value: Math.round(U.massTo(e1Now, 'lb')), unit: unit,
+          text: name + ' · new e1RM', detail: U.mass(e1Now, 'lb', 0) + ' (was ' + U.mass(e1Prev, 'lb', 0) + ')' });
       }
     });
     return out;
@@ -3334,15 +3371,43 @@ AC.engine = (function () {
   /* ---------- increments ---------- */
   function unitFor(slot) {
     var s = S().settings;
-    if (slot.loadType === 'kettlebell') return 'kg';
-    return s.loadUnit;
+    return s.loadUnit === 'kg' ? 'kg' : 'lb';
   }
   function increment(loadType, unit) {
     var lb = { barbell: 5, dumbbell: 5, cable: 5, 'weighted-bodyweight': 2.5, sled: 10 };
     var kg = { barbell: 2.5, dumbbell: 2, cable: 2.5, 'weighted-bodyweight': 1.25, sled: 5 };
     return (unit === 'kg' ? kg : lb)[loadType] || null;
   }
-  function kbList() { return S().settings.kettlebellSizesKg; }
+  /* Bells are listed in kg in Settings; in pounds they show the usual lb labels. */
+  var KB_LB = { 4: 9, 6: 13, 8: 18, 10: 22, 12: 26, 14: 31, 16: 35, 18: 40, 20: 44, 22: 48, 24: 53,
+    26: 57, 28: 62, 32: 70, 36: 80, 40: 88, 44: 97, 48: 106 };
+  function kbList() {
+    var kg = S().settings.kettlebellSizesKg;
+    if (S().settings.loadUnit !== 'kg') return kg.map(function (k) { return KB_LB[k] || Math.round(U.kgToLb(k)); });
+    return kg;
+  }
+  /* Settings → Units: one unit everywhere, including the set on screen right now. */
+  function setUnits(v) {
+    v = v === 'kg' ? 'kg' : 'lb';
+    AC.store.update(function (s) {
+      s.settings.loadUnit = v; s.settings.bodyweightUnit = v;
+      var a = s.activeSession, b = a && a.block;
+      if (!b) return;
+      function conv(d) {
+        if (!d || !d.unit || d.unit === v) return;
+        if (d.load) d.load = Math.round(U.massTo(d.load, d.unit, v) * 2) / 2;
+        d.unit = v;
+      }
+      conv(b.draft);
+      if (b.drafts) Object.keys(b.drafts).forEach(function (k) { conv(b.drafts[k]); });
+      if (b.mode === 'emom' && b.unit && b.unit !== v && b.status === 'ready') {
+        b.load = Math.round(U.massTo(b.load, b.unit, v)); b.unit = v;
+      }
+    });
+    var bb = AS() && AS().block;
+    if (bb && bb.mode === 'emom' && bb.status === 'ready') AC.store.update(function (s) { s.activeSession.block.load = kbSnap(s.activeSession.block.load); });
+    emit();
+  }
   function kbUp(v) { var l = kbList(); for (var i = 0; i < l.length; i++) if (l[i] > v) return l[i]; return v; }
   function kbDown(v) { var l = kbList(); for (var i = l.length - 1; i >= 0; i--) if (l[i] < v) return l[i]; return v; }
   function kbSnap(v) {
@@ -3379,6 +3444,7 @@ AC.engine = (function () {
     var top = 0;
     sets.forEach(function (e) { var l = conv(e.load || 0, e.loadUnit || 'lb'); if (l > top) top = l; });
     if (inc && unit !== (sets[sets.length - 1].loadUnit || 'lb')) top = Math.round(top / inc) * inc;
+    if (slot.loadType === 'kettlebell' && top) top = kbSnap(top);
     var final = sets[sets.length - 1];
     out.last = final;
     out.load = top;
@@ -3464,7 +3530,8 @@ AC.engine = (function () {
       var it = block.items[0];
       var prev = suggestLoadForSlot(it, sessionId);
       b.status = 'ready'; b.minute = 0; b.missed = {}; b.startedAt = null;
-      b.load = prev.load || 24; b.unit = 'kg';
+      b.unit = unitFor(it);
+      b.load = prev.load || (b.unit === 'kg' ? 24 : 53);
       b.minutes = block.emom.minutes; b.repsPerMinute = block.emom.repsPerMinute;
     } else if (block.mode === 'interval') {
       var iv = block.interval;
@@ -3714,7 +3781,7 @@ AC.engine = (function () {
     if (!b || !slot || b.setIndex === undefined) return '';
     var d = b.draft || {};
     return 'Next: set ' + (b.setIndex + 1) +
-      (d.load ? ', ' + d.load + ' ' + (d.unit === 'kg' ? 'kilos' : 'pounds') : '') +
+      (d.load ? ', ' + U.num(U.massTo(d.load, d.unit), 1) + ' ' + (U.prefUnit() === 'kg' ? 'kilos' : 'pounds') : '') +
       (d.reps ? ' times ' + d.reps : '') + '.';
   }
   function timerRemaining() {
@@ -4195,7 +4262,7 @@ AC.engine = (function () {
       done++;
       entries.push({
         blockId: blk.id, slotId: slot.id, exerciseId: slot.exerciseId, setIndex: m,
-        load: b.load, loadUnit: 'kg', reps: b.repsPerMinute, rpe: null,
+        load: b.load, loadUnit: b.unit || 'kg', reps: b.repsPerMinute, rpe: null,
         distanceM: null, seconds: null, isWarmup: false, completedAt: new Date().toISOString()
       });
     }
@@ -4307,7 +4374,7 @@ AC.engine = (function () {
     var r = { blockId: blk.id, mode: b.mode };
     if (b.mode === 'checklist') r.checked = (b.checked || []).slice();
     if (b.mode === 'emom') {
-      r.roundsCompleted = b.roundsCompleted || 0; r.roundsTarget = b.minutes; r.load = b.load;
+      r.roundsCompleted = b.roundsCompleted || 0; r.roundsTarget = b.minutes; r.load = b.load; r.unit = b.unit || 'kg';
     }
     if (b.mode === 'interval') {
       r.efforts = b.effortIndex + (b.status === 'finished' ? 0 : 0);
@@ -4438,7 +4505,7 @@ AC.engine = (function () {
     chooseVariant: chooseVariant, startPhase: startPhase, saveCheckin: saveCheckin, currentRun: currentRun,
     currentBlock: currentBlock, currentSlot: currentSlot, exerciseOf: exerciseOf,
     suggestLoad: suggestLoad, makeDraft: makeDraft, targetReps: targetReps,
-    increment: increment, unitFor: unitFor, kbUp: kbUp, kbDown: kbDown, kbSnap: kbSnap,
+    increment: increment, unitFor: unitFor, setUnits: setUnits, kbUp: kbUp, kbDown: kbDown, kbSnap: kbSnap,
     toggleItem: toggleItem, setDraft: setDraft, setBlockField: setBlockField,
     logSet: logSet, undoLastSet: undoLastSet, editLastSet: editLastSet,
     substitute: substitute, chooseAlternate: chooseAlternate,
@@ -4482,7 +4549,7 @@ AC.report = (function () {
   function fmtSet(e) {
     var bits = [];
     var hasLoad = e.load !== null && e.load !== undefined && e.load !== 0;
-    if (hasLoad) bits.push(U.num(e.load, e.load % 1 ? 1 : 0) + ' ' + (e.loadUnit || 'lb'));
+    if (hasLoad) bits.push(U.mass(e.load, e.loadUnit));
     if (e.reps !== null && e.reps !== undefined) bits.push(hasLoad ? '× ' + e.reps : e.reps + ' reps');
     if (e.distanceM) bits.push('× ' + e.distanceM + ' m');
     if (e.seconds && (e.reps === null || e.reps === undefined)) bits.push(e.seconds + ' s');
@@ -4528,7 +4595,7 @@ AC.report = (function () {
       if (ex.isMainLift) {
         var best = AC.stats.sessionBest(sess, id);
         var added = id === 'weighted-pull-up' || id === 'pull-up' || id === 'dip';
-        if (best !== null) line += ' · est. 1RM ' + num(Math.round(best)) + ' lb' + (added ? ' of added load' : '');
+        if (best !== null) line += ' · est. 1RM ' + U.mass(best, 'lb', 0) + (added ? ' of added load' : '');
       }
       out.push(line);
     });
@@ -4546,7 +4613,7 @@ AC.report = (function () {
         out.push('- ' + label + ': ' + (r.checked || []).length + ' of ' + ((blk && blk.items.length) || '?') + ' done');
       } else if (r.mode === 'emom') {
         out.push('- ' + label + ' (EMOM): ' + r.roundsCompleted + ' of ' + r.roundsTarget +
-          ' rounds' + (r.load ? ' at ' + r.load + ' kg' : ''));
+          ' rounds' + (r.load ? ' at ' + U.mass(r.load, r.unit || 'kg') : ''));
       } else if (r.mode === 'interval') {
         out.push('- ' + label + ': ' + r.efforts + ' efforts of ' + r.effortSeconds + ' s' +
           ((r.slowerFlags || []).length ? ', ' + r.slowerFlags.length + ' marked slower' : '') +
@@ -4580,7 +4647,8 @@ AC.report = (function () {
     out.push('> Goal: ' + st.program.goal);
     out.push('> Targets: ' + U.num(st.settings.calorieTarget) + ' kcal · ' +
       st.settings.proteinMinG + '–' + st.settings.proteinMaxG + ' g protein · ' +
-      U.num(st.settings.stepsMin) + '–' + U.num(st.settings.stepsMax) + ' steps · 0.7–1.0 lb/week of loss');
+      U.num(st.settings.stepsMin) + '–' + U.num(st.settings.stepsMax) + ' steps · ' +
+      (U.prefUnit() === 'kg' ? '0.3–0.45 kg' : '0.7–1.0 lb') + '/week of loss');
     out.push('');
 
     /* ---- adherence ---- */
@@ -4615,7 +4683,7 @@ AC.report = (function () {
         tonnage += AC.stats.setVolume(e, x.bodyweightAtTime);
       });
     });
-    out.push('- Working sets: ' + workSets + ' · total tonnage ' + num(Math.round(tonnage)) + ' lb');
+    out.push('- Working sets: ' + workSets + ' · total tonnage ' + U.mass(tonnage, 'lb', 0));
     var rpes = done.map(function (x) { return x.sessionRPE; }).filter(function (v) { return v; });
     if (rpes.length) out.push('- Session RPE: ' + rpes.join(', ') + ' (average ' + num(U.mean(rpes), 1) + ')');
     out.push('');
@@ -4624,20 +4692,22 @@ AC.report = (function () {
     out.push('## Bodyweight', '');
     var w = metricsIn('weight', start, end);
     if (w.length) {
-      out.push('| Date | Weight (' + st.settings.bodyweightUnit + ') |');
+      out.push('| Date | Weight (' + U.prefUnit() + ') |');
       out.push('|---|---|');
       w.forEach(function (m) { out.push('| ' + U.fmtDate(m.date) + ' | ' + num(m.value, 1) + ' |'); });
       out.push('');
       var avg = U.mean(w.map(function (m) { return m.value; }));
       var prevW = metricsIn('weight', prevStart, prevEnd);
       var prevAvg = prevW.length ? U.mean(prevW.map(function (m) { return m.value; })) : null;
-      out.push('- Week average: **' + num(avg, 1) + ' ' + st.settings.bodyweightUnit + '** from ' + w.length + ' weigh-ins');
+      out.push('- Week average: **' + num(avg, 1) + ' ' + U.prefUnit() + '** from ' + w.length + ' weigh-ins');
       if (prevAvg !== null) {
         var loss = prevAvg - avg;
-        var verdict = loss >= 0.7 && loss <= 1.0 ? 'on target'
-          : loss > 1.5 ? 'too fast — this costs lean mass'
-          : loss > 1.0 ? 'slightly fast'
-          : loss < 0.2 ? 'stalled' : 'under target';
+        /* the program's targets are in pounds per week */
+        var lossLb = U.massTo(loss, U.prefUnit(), 'lb');
+        var verdict = lossLb >= 0.7 && lossLb <= 1.0 ? 'on target'
+          : lossLb > 1.5 ? 'too fast — this costs lean mass'
+          : lossLb > 1.0 ? 'slightly fast'
+          : lossLb < 0.2 ? 'stalled' : 'under target';
         out.push('- Previous week: ' + num(prevAvg, 1) + ' → change **' + signed(-loss, 1) + '** (' + verdict + ')');
       } else {
         out.push('- No previous week to compare against yet.');
@@ -4699,9 +4769,9 @@ AC.report = (function () {
       var wk = AC.stats.weeklyBest(ids);
       var a = wk[wkKey], b = wk[U.isoWeekKey(prevStart)];
       var name = (st.exercises[ids[0]] || {}).name || fam;
-      var change = (a !== undefined && b !== undefined) ? signed(a - b, 0, 'lb') : '—';
-      out.push('| ' + name + ' | ' + (a === undefined ? '—' : num(Math.round(a)) + ' lb') +
-        ' | ' + (b === undefined ? '—' : num(Math.round(b)) + ' lb') + ' | ' + change + ' |');
+      var change = (a !== undefined && b !== undefined) ? signed(U.massTo(a - b, 'lb'), 0, U.prefUnit()) : '—';
+      out.push('| ' + name + ' | ' + (a === undefined ? '—' : U.mass(a, 'lb', 0)) +
+        ' | ' + (b === undefined ? '—' : U.mass(b, 'lb', 0)) + ' | ' + change + ' |');
     });
     out.push('');
 
@@ -4711,11 +4781,11 @@ AC.report = (function () {
     out.push('## Volume by movement pattern', '');
     var keys = Object.keys(pattern).sort();
     if (keys.length) {
-      out.push('| Pattern | Working sets | Volume (lb) |');
+      out.push('| Pattern | Working sets | Volume (' + U.prefUnit() + ') |');
       out.push('|---|---|---|');
       keys.forEach(function (k) {
         var v = vol && vol.patterns[k];
-        out.push('| ' + k + ' | ' + pattern[k] + ' | ' + (v ? num(Math.round(v)) : 'n/a') + ' |');
+        out.push('| ' + k + ' | ' + pattern[k] + ' | ' + (v ? num(Math.round(U.massTo(v, 'lb'))) : 'n/a') + ' |');
       });
       var metres = 0, efforts = 0;
       done.forEach(function (x) {
@@ -4735,9 +4805,10 @@ AC.report = (function () {
     if (scans.length) {
       out.push('## Evolt scans', '');
       scans.forEach(function (x) {
-        out.push('- ' + U.fmtDateLong(x.date) + ': ' + num(x.weight, 1) + ' lb · lean ' + num(x.leanMass, 1) +
-          ' lb · body fat ' + num(x.bodyFatPct, 1) + '% · skeletal muscle ' + num(x.skeletalMuscleMass, 1) +
-          ' lb · visceral ' + num(x.visceralFat) + ' · BMR ' + num(x.bmr) + ' · TEE ' + num(x.tee));
+        var m = function (v) { return v === null || v === undefined ? '—' : U.mass(v, x.unit || 'lb', 1); };
+        out.push('- ' + U.fmtDateLong(x.date) + ': ' + m(x.weight) + ' · lean ' + m(x.leanMass) +
+          ' · body fat ' + num(x.bodyFatPct, 1) + '% · skeletal muscle ' + m(x.skeletalMuscleMass) +
+          ' · visceral ' + num(x.visceralFat) + ' · BMR ' + num(x.bmr) + ' · TEE ' + num(x.tee));
       });
       out.push('', '_BIA reads leaner than DEXA by 2–4 points; treat as a trend._', '');
     }
@@ -4931,7 +5002,7 @@ AC.screens = (function () {
   }
   function fmtLoad(v, unit) {
     if (v === null || v === undefined) return '—';
-    return U.num(v, v % 1 ? 1 : 0) + ' ' + unit;
+    return U.mass(v, unit || 'lb');   /* shown in the unit chosen in Settings */
   }
   function repsRange(t) {
     return (t && t.kind === 'reps' && t.max > t.min) ? 'top of range ' + t.max : null;
@@ -4958,13 +5029,13 @@ AC.screens = (function () {
   function onboarding() {
     var el = screen({ nav: false });
     var unit = S().settings.loadUnit;
-    var weight = 199.7, waist = 32.3;
-    var wStep = ui.stepper({ label: 'Start weight', unit: 'lb', value: weight, step: 0.2, decimals: 1,
-      min: 60, max: 500, onChange: function (v) { weight = v; } });
+    var weight = unit === 'kg' ? 90.6 : 199.7, waist = 32.3;
+    var wStep = ui.stepper({ label: 'Start weight', unit: unit, value: weight, step: unit === 'kg' ? 0.1 : 0.2, decimals: 1,
+      min: unit === 'kg' ? 27 : 60, max: unit === 'kg' ? 230 : 500, onChange: function (v) { weight = v; } });
     var waistStep = ui.stepper({ label: 'Waist at navel', unit: 'in', value: waist, step: 0.1, decimals: 1,
       min: 15, max: 80, size: 'xs', onChange: function (v) { waist = v; } });
     var seg = ui.segmented({ label: 'Units', value: unit, options: [{ id: 'lb', label: 'lb' }, { id: 'kg', label: 'kg' }],
-      onChange: function (v) { unit = v; AC.store.update(function (s) { s.settings.loadUnit = v; s.settings.bodyweightUnit = v; }); render(); } });
+      onChange: function (v) { unit = v; AC.engine.setUnits(v); render(); } });
     var prog = S().program;
     /* Program overview, straight from the program data: weeks, format and the days. */
     var days = h('ul', { class: 'ob-days' }, prog.days.map(function (d) {
@@ -4991,7 +5062,7 @@ AC.screens = (function () {
         AC.store.update(function (s) {
           s.onboarded = true;
           s.schedule.programStartDate = today;
-          s.metrics.push({ id: U.uid('m'), date: today, type: 'weight', value: weight, unit: 'lb', source: 'manual' });
+          s.metrics.push({ id: U.uid('m'), date: today, type: 'weight', value: weight, unit: unit, source: 'manual' });
           s.metrics.push({ id: U.uid('m'), date: today, type: 'waist', value: waist, unit: 'in', source: 'manual' });
         });
         AC.router.go('home');
@@ -5160,7 +5231,7 @@ AC.screens = (function () {
       h('div', { class: 'cap', text: 'Weekly review' }),
       h('div', { class: 'statline' },
         h('span', { class: 'v num', text: U.num(r.avg, 1) }),
-        h('span', { class: 'd ' + (r.loss > 0 ? 'up' : ''), text: r.loss === null ? 'lb avg' : (r.loss > 0 ? '▾ ' : '▴ ') + U.num(Math.abs(r.loss), 1) + ' lb this week' })),
+        h('span', { class: 'd ' + (r.loss > 0 ? 'up' : ''), text: r.loss === null ? U.prefUnit() + ' avg' : (r.loss > 0 ? '▾ ' : '▴ ') + U.num(Math.abs(r.loss), 1) + ' ' + U.prefUnit() + ' this week' })),
       h('p', { style: 'font-size:var(--fs-label)', text: r.text }));
     var row = h('div', { class: 'btn-row' });
     if (r.delta) {
@@ -5421,7 +5492,7 @@ AC.screens = (function () {
     if (s.suggested) wrap.appendChild(h('span', { class: 'sugg', text: '↑ ' + U.num(s.load, 0) + ' sugg.' }));
     var expanded = false;
     var all = h('span', { class: 'allsets', hidden: true, text: s.lastSets.map(function (e) {
-      return (e.load === null ? '' : U.num(e.load, 0)) + '×' + (e.reps === null ? (e.seconds || '') : e.reps) + (e.rpe ? '@' + e.rpe : '');
+      return (e.load === null ? '' : U.mass(e.load, e.loadUnit).replace(/ (lb|kg)$/, '')) + '×' + (e.reps === null ? (e.seconds || '') : e.reps) + (e.rpe ? '@' + e.rpe : '');
     }).join(' · ') });
     wrap.appendChild(all);
     wrap.addEventListener('click', function () { expanded = !expanded; all.hidden = !expanded; });
@@ -5436,12 +5507,13 @@ AC.screens = (function () {
   function loadStepper(slot, draft, onChange) {
     var unit = draft.unit;
     if (slot.loadType === 'kettlebell') {
-      return ui.stepper({ label: 'Bell', unit: 'kg', value: draft.load,
+      return ui.stepper({ label: 'Bell', unit: unit, value: draft.load,
         snap: true, stepUp: AC.engine.kbUp, stepDown: AC.engine.kbDown,
-        min: 4, max: 60, onChange: onChange, suggested: draft.suggested ? draft.load : undefined });
+        min: unit === 'kg' ? 4 : 9, max: unit === 'kg' ? 60 : 130, onChange: onChange, suggested: draft.suggested ? draft.load : undefined });
     }
     var inc = AC.engine.increment(slot.loadType, unit) || 5;
-    var label = slot.loadType === 'weighted-bodyweight' ? 'Added load' : 'Load';
+    var label = slot.loadType === 'weighted-bodyweight' ? 'Added load'
+      : slot.loadType === 'dumbbell' ? 'Load per dumbbell' : 'Load';
     var plateLine = null;
     var change = onChange;
     if (slot.loadType === 'barbell') {
@@ -5472,7 +5544,7 @@ AC.screens = (function () {
       h('div', { class: 'statline' },
         h('span', { class: 'v num', text: String(count) }),
         h('span', { class: 'd', text: unit + (count === 1 ? '' : 's') +
-          (extra > 0 ? ' · ' + extra + ' added' : '') + (vol ? ' · ' + U.num(Math.round(vol)) + ' lb' : '') })),
+          (extra > 0 ? ' · ' + extra + ' added' : '') + (vol ? ' · ' + U.mass(vol, 'lb', 0) : '') })),
       h('p', { style: 'font-size:var(--fs-label);color:var(--text-2)',
         text: 'Add another ' + unit + ' if you have one in you, or move on.' })));
     wrap.appendChild(setList(blk, true));
@@ -5681,7 +5753,7 @@ AC.screens = (function () {
     var ex = S().exercises[slot.exerciseId] || { name: slot.exerciseId };
     var body = [];
     if (hh.best) body.push(h('div', { class: 'card stack-2' }, h('div', { class: 'meta', text: 'Best set (estimated 1RM)' }),
-      h('div', { style: 'font-size:var(--fs-h2);font-weight:800', text: (hh.best.best.load ? U.num(hh.best.best.load, 0) + ' ' + hh.best.best.loadUnit + ' × ' : '') + hh.best.best.reps + (hh.best.e1rm ? ' · e1RM ' + U.num(Math.round(hh.best.e1rm)) + ' lb' : '') }),
+      h('div', { style: 'font-size:var(--fs-h2);font-weight:800', text: (hh.best.best.load ? U.mass(hh.best.best.load, hh.best.best.loadUnit) + ' × ' : '') + hh.best.best.reps + (hh.best.e1rm ? ' · e1RM ' + U.mass(hh.best.e1rm, 'lb', 0) : '') }),
       h('div', { class: 'meta', text: U.fmtDateLong(hh.best.date) })));
     hh.last.forEach(function (r) {
       body.push(h('div', { class: 'stack-2' }, h('div', { class: 'meta-strong', text: U.fmtDateLong(r.date) }),
@@ -5821,8 +5893,9 @@ AC.screens = (function () {
     wrap.appendChild(exHead(slot, b.repsPerMinute + ' swings at the top of each minute'));
     if (b.status === 'ready') {
       wrap.appendChild(h('div', { class: 'ex-note', text: blk.instructions }));
-      wrap.appendChild(ui.stepper({ label: 'Bell', unit: 'kg', value: b.load, snap: true,
-        stepUp: AC.engine.kbUp, stepDown: AC.engine.kbDown, min: 4, max: 60,
+      var bu = b.unit || 'kg';
+      wrap.appendChild(ui.stepper({ label: 'Bell', unit: bu, value: b.load, snap: true,
+        stepUp: AC.engine.kbUp, stepDown: AC.engine.kbDown, min: bu === 'kg' ? 4 : 9, max: bu === 'kg' ? 60 : 130,
         onChange: function (v) { AC.engine.setBlockField('load', v); } }));
       wrap.appendChild(h('div', { style: 'display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:var(--s-2)' },
         ui.stepper({ label: 'Minutes', value: b.minutes, step: 1, min: 1, max: 30, size: 'xs',
@@ -5839,7 +5912,7 @@ AC.screens = (function () {
         h('div', { class: 'cap', text: 'Finisher done' }),
         h('div', { class: 'statline' },
           h('span', { class: 'v num', text: String(b.roundsCompleted) }),
-          h('span', { class: 'd', text: 'of ' + b.minutes + ' rounds at ' + b.load + ' kg' }))));
+          h('span', { class: 'd', text: 'of ' + b.minutes + ' rounds at ' + U.mass(b.load, b.unit || 'kg') }))));
       wrap.appendChild(h('div', { class: 'spacer' }));
       wrap.appendChild(h('div', { class: 'actions' },
         ui.btn('Done', function () { AC.engine.nextBlock(); }, 'primary')));
@@ -6134,7 +6207,7 @@ AC.screens = (function () {
     var stats = h('div', { class: 'statrow' },
       h('div', null, h('span', { class: 'v', text: (log.totals.durationSec || 0) < 60 ? '<1 min' : mins + ' min' }), h('span', { class: 'meta', text: 'Duration' })),
       h('div', null, h('span', { class: 'v', text: log.totals.setsLogged + (planned ? '/' + planned : '') }), h('span', { class: 'meta', text: 'Sets' })),
-      h('div', null, h('span', { class: 'v', text: U.num(log.totals.volumeLb, 0) }), h('span', { class: 'meta', text: 'Total volume · lb' })));
+      h('div', null, h('span', { class: 'v', text: U.num(U.massTo(AC.stats.sessionVolume(log), 'lb'), 0) }), h('span', { class: 'meta', text: 'Total volume · ' + U.prefUnit() })));
 
     var prList = h('div', { class: 'stack-2' });
     var rank = { e1rm: 0, load: 1, reps: 2 };
@@ -6443,7 +6516,7 @@ AC.screens = (function () {
       rows.forEach(function (ex) {
         var series = AC.stats.e1rmSeries(ex.id);
         var meta = ex.equipment[0] + ' · ' + ex.pattern +
-          (series.length ? ' · e1RM ' + U.num(series[series.length - 1].y, 0) + ' lb' : '');
+          (series.length ? ' · e1RM ' + U.mass(series[series.length - 1].y, 'lb', 0) : '');
         var thumb = h('span', { class: 'thumbbtn', style: 'pointer-events:none' }, AC.svg.figure(ex.mediaRef, { animate: false, thumb: true }));
         list.appendChild(h('li', {}, h('button', { class: 'listrow', type: 'button',
           onclick: function () { AC.router.go('exercise', ex.id); } },
@@ -6543,12 +6616,14 @@ AC.screens = (function () {
       }) : null));
     var body = h('div', { class: 'stack scroll' });
     body.appendChild(exerciseDetail(ex, null, false));
-    var series = AC.stats.e1rmSeries(id);
+    var series = AC.stats.e1rmSeries(id).map(function (p) {
+      return Object.assign({}, p, { y: Math.round(U.massTo(p.y, 'lb') * 10) / 10 });
+    });
     body.appendChild(h('div', { class: 'card stack-2' },
       h('div', { class: 'cap', text: 'Estimated 1RM' }),
       h('div', { class: 'statline' },
         h('span', { class: 'v num', text: series.length ? U.num(series[series.length - 1].y, 0) : '—' }),
-        h('span', { class: 'd', text: 'lb' })),
+        h('span', { class: 'd', text: U.prefUnit() })),
       AC.charts.line({ height: 180, label: ex.name + ' estimated one-rep max over time',
         series: [{ type: 'line', data: series, class: 'c-avg', labelLast: true, dotClass: 'c-avg-dot' }],
         emptyText: 'Log this lift twice and the trend appears.' })));
@@ -6564,7 +6639,7 @@ AC.screens = (function () {
             h('div', { class: 'listrow-main' },
               h('div', { class: 'listrow-title', text: U.fmtDateLong(AC.stats.sessionDay(s)) }),
               h('div', { class: 'listrow-sub', text: sets.map(function (e) {
-                return (e.load === null ? '' : U.num(e.load, 0)) + '×' + (e.reps === null ? (e.seconds || '') : e.reps) + (e.rpe ? '@' + e.rpe : '');
+                return (e.load === null ? '' : U.mass(e.load, e.loadUnit).replace(/ (lb|kg)$/, '')) + '×' + (e.reps === null ? (e.seconds || '') : e.reps) + (e.rpe ? '@' + e.rpe : '');
               }).join(' · ') })));
         }))));
     }
@@ -6584,7 +6659,7 @@ AC.screens = (function () {
     var roll = AC.stats.rolling7('weight').filter(function (r) { return (all || r.x >= xMin) && r.avg !== null; });
     if (roll.length > 7) {
       var d = roll[roll.length - 1].avg - roll[0].avg;
-      bits.push(Math.abs(d) < 0.3 ? 'weight steady' : 'weight ' + (d < 0 ? '−' : '+') + U.num(Math.abs(d), 1) + ' lb');
+      bits.push(Math.abs(U.massTo(d, U.prefUnit(), 'lb')) < 0.3 ? 'weight steady' : 'weight ' + (d < 0 ? '−' : '+') + U.num(Math.abs(d), 1) + ' ' + U.prefUnit());
     }
     var bestLift = null;
     Object.keys(AC.stats.MAIN_FAMILIES).forEach(function (fam) {
@@ -6595,7 +6670,7 @@ AC.screens = (function () {
     });
     if (bestLift && Math.abs(bestLift.d) >= 1) {
       var ex = S().exercises[bestLift.id];
-      bits.push((ex ? ex.name : bestLift.id) + ' e1RM ' + (bestLift.d > 0 ? '+' : '−') + U.num(Math.abs(Math.round(bestLift.d))) + ' lb');
+      bits.push((ex ? ex.name : bestLift.id) + ' e1RM ' + (bestLift.d > 0 ? '+' : '−') + U.mass(Math.abs(bestLift.d), 'lb', 0));
     }
     var span = all ? 'all time' : progRange === 28 ? 'last 4 weeks' : progRange === 56 ? 'last 8 weeks' : 'last 12 weeks';
     return bits.length ? bits.join(' · ') + ' (' + span + ')' : 'Log a few sessions and weigh-ins to see your trend here.';
@@ -6623,8 +6698,8 @@ AC.screens = (function () {
       h('div', { class: 'cap', text: 'Bodyweight · 7-day average' }),
       h('div', { class: 'statline' },
         h('span', { class: 'v num', text: bw ? U.num(bw.avg, 1) : '—' }),
-        h('span', { class: 'd ' + (wk !== null && wk < 0 ? 'up' : ''), text: wk === null ? 'lb' :
-          'lb · ' + (wk <= 0 ? '▾ ' : '▴ ') + U.num(Math.abs(wk), 1) + ' lb/wk' })),
+        h('span', { class: 'd ' + (wk !== null && wk < 0 ? 'up' : ''), text: wk === null ? U.prefUnit() :
+          U.prefUnit() + ' · ' + (wk <= 0 ? '▾ ' : '▴ ') + U.num(Math.abs(wk), 1) + ' ' + U.prefUnit() + '/wk' })),
       AC.charts.line({ height: 200, label: 'Bodyweight, 7-day average ' + (bw ? U.num(bw.avg, 1) : 'no data'),
         format: function (v) { return U.num(v, 1); },
         series: [
@@ -6673,7 +6748,7 @@ AC.screens = (function () {
     var thisWk = weeks.length ? weeks[weeks.length - 1] : null;
     var rows = thisWk ? Object.keys(thisWk.patterns).sort(function (a, b) { return thisWk.patterns[b] - thisWk.patterns[a]; })
       .map(function (p) { return { label: p, value: Math.round(thisWk.patterns[p]),
-        display: U.num(Math.round(thisWk.patterns[p]), 0) + ' lb' }; }) : [];
+        display: U.mass(thisWk.patterns[p], 'lb', 0) }; }) : [];
     body.appendChild(h('div', { class: 'card stack-2' },
       h('div', { class: 'cap', text: 'Weekly volume by pattern' +
         (thisWk && thisWk.week === U.isoWeekKey(today) ? ' · this week' : thisWk ? ' · week of ' + U.fmtDate(U.weekStart(today)) : '') }),
@@ -6686,13 +6761,13 @@ AC.screens = (function () {
     body.appendChild(h('div', { class: 'card stack-2' },
       h('div', { class: 'cap', text: 'Evolt scans' }),
       last ? h('div', { class: 'row' },
-        h('span', { class: 'statline' }, h('span', { class: 'v num', text: U.num(last.leanMass, 1) }), h('span', { class: 'd', text: 'lb lean' })),
+        h('span', { class: 'statline' }, h('span', { class: 'v num', text: U.num(scanMass(last, 'leanMass'), 1) }), h('span', { class: 'd', text: U.prefUnit() + ' lean' })),
         h('span', { class: 'statline' }, h('span', { class: 'v num', text: U.num(last.bodyFatPct, 1) }), h('span', { class: 'd', text: '% fat' }))) : null,
       AC.charts.line({ height: 170, label: 'Lean mass and body fat percentage from Evolt scans',
         format: function (v) { return U.num(v, 1); },
         series: [
-          { type: 'line', data: scans.map(function (s) { return { x: s.date, y: s.leanMass }; }), class: 'c-avg', labelLast: true, dotClass: 'c-avg-dot' },
-          { type: 'markers', data: scans.map(function (s) { return { x: s.date, y: s.leanMass }; }), class: 'c-scan' }
+          { type: 'line', data: scans.map(function (s) { return { x: s.date, y: scanMass(s, 'leanMass') }; }), class: 'c-avg', labelLast: true, dotClass: 'c-avg-dot' },
+          { type: 'markers', data: scans.map(function (s) { return { x: s.date, y: scanMass(s, 'leanMass') }; }), class: 'c-scan' }
         ],
         emptyText: 'No scans yet — scan every 6–8 weeks.' }),
       scans.length ? h('div', { class: 'cap', text: 'Body fat %' }) : null,
@@ -6776,10 +6851,15 @@ AC.screens = (function () {
       s.metrics.sort(function (a, b) { return a.date < b.date ? -1 : 1; });
     });
   }
+  /* Scans saved before units were stored are in pounds. */
+  function scanMass(x, field) {
+    var v = x[field];
+    return v === null || v === undefined ? v : Math.round(U.massTo(v, x.unit || 'lb') * 10) / 10;
+  }
   function evoltForm() {
     var fields = [
-      ['weight', 'Weight', 'lb'], ['leanMass', 'Lean mass', 'lb'],
-      ['skeletalMuscleMass', 'Skeletal muscle mass', 'lb'], ['bodyFatMass', 'Body fat mass', 'lb'],
+      ['weight', 'Weight', U.prefUnit()], ['leanMass', 'Lean mass', U.prefUnit()],
+      ['skeletalMuscleMass', 'Skeletal muscle mass', U.prefUnit()], ['bodyFatMass', 'Body fat mass', U.prefUnit()],
       ['bodyFatPct', 'Body fat', '%'], ['visceralFat', 'Visceral fat', 'level'],
       ['bmr', 'BMR', 'kcal'], ['tee', 'TEE', 'kcal']
     ];
@@ -6797,15 +6877,15 @@ AC.screens = (function () {
       ui.btn('Save scan', function () {
         var scanId = U.uid('scan');
         AC.store.update(function (st) {
-          st.scans.push({ id: scanId, date: date,
+          st.scans.push({ id: scanId, date: date, unit: U.prefUnit(),
             weight: vals.weight || null, leanMass: vals.leanMass || null,
             skeletalMuscleMass: vals.skeletalMuscleMass || null, bodyFatMass: vals.bodyFatMass || null,
             bodyFatPct: vals.bodyFatPct || null, visceralFat: vals.visceralFat || null,
             bmr: vals.bmr || null, tee: vals.tee || null });
         });
-        if (vals.weight) saveMetric('weight', vals.weight, 'lb', date, 'evolt-scan', scanId);
+        if (vals.weight) saveMetric('weight', vals.weight, U.prefUnit(), date, 'evolt-scan', scanId);
         if (vals.bodyFatPct) saveMetric('bodyfatPct', vals.bodyFatPct, '%', date, 'evolt-scan', scanId);
-        if (vals.leanMass) saveMetric('leanMass', vals.leanMass, 'lb', date, 'evolt-scan', scanId);
+        if (vals.leanMass) saveMetric('leanMass', vals.leanMass, U.prefUnit(), date, 'evolt-scan', scanId);
         s.close(); ui.toast('Scan saved.'); render();
       }, 'primary')] });
   }
@@ -7112,14 +7192,15 @@ AC.screens = (function () {
       stage.appendChild(wipe);
       stage.appendChild(range);
       function cap(p, side) {
-        var dw = side === 'right' && L.weight && p.weight ? p.weight - L.weight : null;
+        var pw = p.weight ? U.massTo(p.weight, p.weightUnit || 'lb') : null;
+        var dw = side === 'right' && L.weight && pw ? pw - U.massTo(L.weight, L.weightUnit || 'lb') : null;
         var on = ps.active === side;
         return h('button', { class: 'photocap' + (on ? ' is-on' : ''), type: 'button', 'aria-pressed': on ? 'true' : 'false',
           onclick: function () { ps.active = side; render(); } },
           h('span', { class: 'vh', text: (side === 'left' ? 'Left photo: ' : 'Right photo: ') }),
           h('b', { text: U.fmtDate(p.date) }),
           h('span', { text: 'Phase ' + phaseInfo(p.phaseId).number + ' · Week ' + (p.week || 1) }),
-          h('span', { class: 'num', text: p.weight ? U.num(p.weight, 1) + ' ' + (p.weightUnit || 'lb') + (dw !== null ? ' (' + (dw > 0 ? '+' : dw < 0 ? '−' : '±') + U.num(Math.abs(dw), 1) + ')' : '') : '' }),
+          h('span', { class: 'num', text: pw ? U.num(pw, 1) + ' ' + U.prefUnit() + (dw !== null ? ' (' + (dw > 0 ? '+' : dw < 0 ? '−' : '±') + U.num(Math.abs(dw), 1) + ')' : '') : '' }),
           h('span', { class: 'vh', text: '. Tap, then pick a week below to change it.' }));
       }
       stage.appendChild(h('div', { class: 'photocaps' }, cap(L, 'left'), cap(R2, 'right')));
@@ -7186,13 +7267,13 @@ AC.screens = (function () {
     }
     list.forEach(function (s) {
       var day = dayById(s.dayId) || { letter: '?', label: '' };
-      var vol = (s.totals && s.totals.volumeLb) || 0;
+      var vol = AC.stats.sessionVolume(s);
       body.appendChild(h('button', { class: 'listrow', type: 'button',
         onclick: function () { sessionSheet(s); } },
         h('div', { class: 'listrow-main' },
           h('div', { class: 'listrow-title', text: 'Day ' + day.letter + ' — ' + day.label }),
           h('div', { class: 'listrow-sub', text: U.fmtDateLong(AC.stats.sessionDay(s)) +
-            ' · ' + (s.status === 'complete' ? U.num(vol, 0) + ' lb · ' + (s.totals ? s.totals.setsLogged : 0) + ' sets' : s.status) })),
+            ' · ' + (s.status === 'complete' ? U.mass(vol, 'lb', 0) + ' · ' + (s.totals ? s.totals.setsLogged : 0) + ' sets' : s.status) })),
         use('i-right')));
     });
     el.appendChild(body);
@@ -7245,10 +7326,13 @@ AC.screens = (function () {
     var sess = S().sessions.filter(function (x) { return x.id === sessionId; })[0];
     var e = sess && sess.entries[index];
     if (!e) return;
-    var load = e.load || 0, reps = e.reps || 0;
+    /* shown and edited in the unit chosen in Settings; an untouched load keeps its original value */
+    var pu = U.prefUnit();
+    var shownLoad = Math.round(U.massTo(e.load || 0, e.loadUnit || 'lb') * 10) / 10;
+    var load = shownLoad, reps = e.reps || 0;
     var ex = S().exercises[e.exerciseId] || { name: e.exerciseId };
     var body = [];
-    if (e.load !== null && e.load !== undefined) body.push(ui.stepper({ label: 'Load', unit: e.loadUnit, value: load, step: e.loadUnit === 'kg' ? 2.5 : 5, decimals: 1, min: 0, max: 1200, size: 'sm', onChange: function (v) { load = v; } }));
+    if (e.load !== null && e.load !== undefined) body.push(ui.stepper({ label: 'Load', unit: pu, value: load, step: pu === 'kg' ? 2.5 : 5, decimals: 1, min: 0, max: 1200, size: 'sm', onChange: function (v) { load = v; } }));
     body.push(ui.stepper({ label: 'Reps', value: reps, step: 1, min: 0, max: 100, size: 'sm', onChange: function (v) { reps = v; } }));
     var sh = ui.sheet({ title: ex.name + ' · set ' + (e.setIndex + 1), body: body, actionsGrid: true, actions: [
       ui.btn('Cancel', function () { sh.close(); sessionSheet(S().sessions.filter(function (x) { return x.id === sessionId; })[0]); }, 'ghost'),
@@ -7256,7 +7340,7 @@ AC.screens = (function () {
         AC.store.update(function (st) {
           var x = st.sessions.filter(function (q) { return q.id === sessionId; })[0];
           var en = x.entries[index];
-          if (en.load !== null && en.load !== undefined) en.load = load;
+          if (en.load !== null && en.load !== undefined && load !== shownLoad) { en.load = load; en.loadUnit = pu; }
           en.reps = reps;
           en.editedAt = new Date().toISOString();
           if (x.totals) x.totals.volumeLb = Math.round(AC.stats.sessionVolume(x));
@@ -7385,7 +7469,7 @@ AC.screens = (function () {
     body.appendChild(group('Workout'));
     body.appendChild(h('div', { class: 'stack-2' }, h('span', { class: 'cap', text: 'Units' }),
       ui.segmented({ value: s2.loadUnit, options: [{ id: 'lb', label: 'lb' }, { id: 'kg', label: 'kg' }],
-        onChange: function (v) { upd(function (x) { x.loadUnit = v; x.bodyweightUnit = v; }); render(); } })));
+        onChange: function (v) { AC.engine.setUnits(v); render(); } })));
     var lbU = s2.loadUnit !== 'kg';
     body.appendChild(h('div', { class: 'stack-2' }, h('span', { class: 'cap', text: 'Plate calculator' }),
       ui.stepper({ label: 'Bar weight', unit: s2.loadUnit, value: lbU ? s2.barWeightLb : s2.barWeightKg, step: lbU ? 5 : 2.5, decimals: 1, min: 0, max: 100, size: 'xs',

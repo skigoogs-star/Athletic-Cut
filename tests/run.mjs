@@ -351,9 +351,13 @@ console.log('\nT07  algorithms');
     out.epley5 = Math.round(AC.stats.epley(245, 5) * 100) / 100;
     out.week = U.isoWeekKey('2026-01-01');
     out.weekDec = U.isoWeekKey('2026-12-28');
+    // kettlebell sizes in kg (Settings → Units: kg), then back to lb
+    AC.store.update(s => { s.settings.loadUnit = 'kg'; });
     out.kbUp = AC.engine.kbUp(24);
     out.kbDown = AC.engine.kbDown(24);
     out.kbSnap = AC.engine.kbSnap(23);
+    AC.store.update(s => { s.settings.loadUnit = 'lb'; });
+    out.kbLb = [AC.engine.kbUp(35), AC.engine.kbDown(35), AC.engine.kbSnap(52)];
     out.incBar = AC.engine.increment('barbell', 'lb');
     out.incWbw = AC.engine.increment('weighted-bodyweight', 'lb');
     out.incBarKg = AC.engine.increment('barbell', 'kg');
@@ -366,6 +370,7 @@ console.log('\nT07  algorithms');
   eq('kettlebell up from 24', r.kbUp, 28);
   eq('kettlebell down from 24', r.kbDown, 20);
   eq('kettlebell snap 23 -> 24', r.kbSnap, 24);
+  eq('in lb, bells use the lb labels: up from 35 is 44, down is 26, 52 snaps to 53', r.kbLb, [44, 26, 53]);
   eq('barbell increment lb', r.incBar, 5);
   eq('weighted-bodyweight increment', r.incWbw, 2.5);
   eq('barbell increment kg', r.incBarKg, 2.5);
@@ -1384,11 +1389,11 @@ console.log('\nT16  weekly Markdown report');
   ok('nutrition is tabled with an on-target column', /\| Date \| kcal \| Protein \(g\) \| Steps \| On target \|/.test(md));
   ok('sets carry load, reps and RPE', /250 lb × 5 @8/.test(md), md.match(/.*250 lb.*/) || '');
   ok('bodyweight sets read as reps', /10 reps/.test(md));
-  ok('kettlebell keeps its own unit', /24 kg × 12/.test(md));
+  ok('a kettlebell logged in kg shows in the chosen unit (lb)', /52\.9 lb × 12/.test(md), md.match(/.*× 12.*/) || '');
   ok('carries record distance', /70 lb × 40 m/.test(md));
   ok('an estimated 1RM is given for main lifts', /est\. 1RM \d+ lb/.test(md));
   ok('but not for accessories', !/Hanging leg raise.*est\. 1RM/.test(md));
-  ok('EMOM rounds are reported', /8 rounds at 24 kg/.test(md) || /7 of 8 rounds at 24 kg/.test(md));
+  ok('EMOM rounds are reported', /8 rounds at 52\.9 lb/.test(md) || /7 of 8 rounds at 52\.9 lb/.test(md), md.match(/.*rounds at.*/) || '');
   ok('the session note is included', /Back felt tight/.test(md));
   ok('main lifts compare week over week', /\| Lift \| This week \| Previous week \| Change \|/.test(md));
   ok('volume by pattern is tabled', /\| Pattern \| Working sets \| Volume \(lb\) \|/.test(md));
@@ -2090,6 +2095,69 @@ console.log('\nV2-16  sprints: adjust between efforts, step back out and resume'
   await page.waitForTimeout(30);
   s = await state(page);
   eq('both efforts logged, each with its own length', s.activeSession.entries.map(e => e.seconds), [20, 15]);
+  await ctx.close();
+}
+
+console.log('\nV2-17  one unit everywhere, and volume counts both sides');
+{
+  const { ctx, page } = await newPage();
+  await page.goto(BASE);
+  await tap(page, /Begin week 1/i);
+  // History in mixed units: a kettlebell EMOM in kg, a dumbbell row in lb, a weigh-in in lb.
+  await page.evaluate(() => {
+    const U = AC.util, d = U.addDays(U.todayKey(), -2);
+    const e = (o) => Object.assign({ blockId: 'x', slotId: 'x', setIndex: 0, rpe: null, distanceM: null, seconds: null,
+      isWarmup: false, completedAt: d + 'T10:00:00.000Z' }, o);
+    AC.store.update(s => {
+      s.sessions.push({ id: 'mix', dayId: 'day-d', dayOptionId: null, startedAt: d + 'T10:00:00.000Z', completedAt: d + 'T10:40:00.000Z',
+        dateKey: d, status: 'complete', sessionRPE: 8, bodyweightAtTime: 200, notes: '', blockResults: [], beatLast: [],
+        totals: { volumeLb: 0, setsLogged: 2, durationSec: 2400 },
+        entries: [e({ exerciseId: 'kettlebell-swing', load: 24, loadUnit: 'kg', reps: 12 }),
+                  e({ exerciseId: 'single-arm-dumbbell-row', load: 50, loadUnit: 'lb', reps: 10 }),
+                  e({ exerciseId: 'dumbbell-bench-press', load: 50, loadUnit: 'lb', reps: 8 })] });
+      s.metrics.push({ id: 'w1', date: d, type: 'weight', value: 200, unit: 'lb', source: 'manual' });
+    });
+  });
+  const vol = await page.evaluate(() => {
+    const st = AC.stats, s = AC.store.get().sessions.find(x => x.id === 'mix');
+    return s.entries.map(e => Math.round(st.setVolume(e, 200)));
+  });
+  eq('volume: one bell × 12; one dumbbell × 10 × both sides; two dumbbells × 8', vol, [Math.round(24 * 2.20462 * 12), 1000, 800]);
+
+  await page.evaluate(() => AC.engine.setUnits('kg'));
+  const kg = await page.evaluate(() => ({
+    row: AC.report.weekly ? null : null,
+    weight: AC.stats.latest('weight'),
+    mass: AC.util.mass(50, 'lb'),
+    bells: [AC.engine.kbUp(20), AC.engine.unitFor({ loadType: 'kettlebell' })]
+  }));
+  eq('in kg, the 199.7 lb start weight reads 90.6 kg', [kg.weight.value, kg.weight.unit], [90.6, 'kg']);
+  eq('a 50 lb dumbbell reads 22.7 kg', kg.mass, '22.7 kg');
+  eq('kettlebells step through the kg sizes', kg.bells, [24, 'kg']);
+
+  await page.evaluate(() => AC.engine.setUnits('lb'));
+  const lb = await page.evaluate(() => [AC.engine.kbUp(44), AC.engine.kbDown(53), AC.engine.unitFor({ loadType: 'kettlebell' }), AC.util.mass(24, 'kg')]);
+  eq('in lb, kettlebells use the lb labels (44 → 53, 53 → 44) and a 24 kg bell reads 52.9 lb', lb, [53, 44, 'lb', '52.9 lb']);
+
+  // Day A EMOM in lb: the bell is in pounds and logs in pounds.
+  await page.evaluate(() => { AC.engine.start('day-a'); for (let i = 0; i < 3; i++) AC.engine.skipBlock(); AC.router.go('session'); });
+  await page.waitForSelector('.runner');
+  ok('the EMOM bell is in lb', /Bell · lb/.test(await page.locator('.stepper-wrap .cap').first().innerText()));
+  const em = await page.evaluate(() => AC.store.get().activeSession.block);
+  eq('and starts from last time\'s 24 kg bell as 53 lb', [em.unit, em.load], ['lb', 53]);
+  // Switching units mid-session converts the bell on screen.
+  await page.evaluate(() => AC.engine.setUnits('kg'));
+  const em2 = await page.evaluate(() => AC.store.get().activeSession.block);
+  eq('switching to kg mid-session turns it into 24 kg', [em2.unit, em2.load], ['kg', 24]);
+  await page.evaluate(() => AC.engine.abandon());
+
+  // Day D: the dumbbell box says per dumbbell.
+  await page.evaluate(() => { AC.engine.setUnits('lb'); AC.engine.start('day-d'); });
+  const dIdx = await page.evaluate(() => AC.store.get().activeSession.blocks.findIndex(b => b.items.some(i => i.exerciseId === 'dumbbell-bench-press')));
+  await page.evaluate(n => { for (let i = 0; i < n; i++) AC.engine.skipBlock(); AC.router.go('session'); }, dIdx);
+  await page.waitForSelector('.runner');
+  ok('dumbbell loads are labelled per dumbbell', (await page.locator('text=/Load per dumbbell · lb/').count()) >= 1);
+  await page.evaluate(() => AC.engine.abandon());
   await ctx.close();
 }
 
