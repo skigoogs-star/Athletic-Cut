@@ -899,6 +899,15 @@ AC.util = (function () {
     to = to || prefUnit(); from = from || 'lb';
     return from === to ? v : to === 'kg' ? lbToKg(v) : kgToLb(v);
   }
+  /* Tape measurements follow the same setting: inches with lb, centimetres with kg. */
+  function prefLength() {
+    try { return AC.store.get().settings.waistUnit === 'cm' ? 'cm' : 'in'; } catch (e) { return 'in'; }
+  }
+  function lengthTo(v, from, to) {
+    if (v === null || v === undefined || isNaN(v)) return v;
+    to = to || prefLength(); from = from === 'cm' ? 'cm' : 'in';
+    return from === to ? v : to === 'cm' ? v * 2.54 : v / 2.54;
+  }
   /* "61.2 kg" / "135 lb": whole numbers stay whole, converted values get one decimal. */
   function mass(v, from, dp) {
     var x = massTo(v, from);
@@ -963,7 +972,7 @@ AC.util = (function () {
     dayIndex: dayIndex, keyFromIndex: keyFromIndex, daysBetween: daysBetween, isoWeekKey: isoWeekKey, weekStart: weekStart,
     weekKeyOffset: weekKeyOffset, fmtDate: fmtDate, fmtDateLong: fmtDateLong,
     fmtClock: fmtClock, fmtMs: fmtMs, clamp: clamp, roundTo: roundTo, num: num,
-    lbToKg: lbToKg, kgToLb: kgToLb, toLb: toLb, prefUnit: prefUnit, massTo: massTo, mass: mass, mean: mean,
+    lbToKg: lbToKg, kgToLb: kgToLb, toLb: toLb, prefUnit: prefUnit, massTo: massTo, mass: mass, prefLength: prefLength, lengthTo: lengthTo, mean: mean,
     h: h, svgUse: svgUse, clear: clear, announce: announce,
     reduceMotion: reduceMotion, LB_PER_KG: LB_PER_KG
   };
@@ -2963,7 +2972,13 @@ AC.stats = (function () {
   /* Weigh-ins and scan masses come back in the unit chosen in Settings, whatever
      unit they were logged in. */
   var MASS_METRICS = { weight: 1, leanMass: 1, skeletalMuscleMass: 1, bodyFatMass: 1 };
+  var LENGTH_METRICS = { waist: 1, chest: 1, arm: 1, thigh: 1, hips: 1 };
   function inPrefUnit(m) {
+    if (LENGTH_METRICS[m.type]) {
+      var lt = U.prefLength(), lf = m.unit === 'cm' ? 'cm' : 'in';
+      if (lf === lt) return m;
+      return Object.assign({}, m, { value: Math.round(U.lengthTo(m.value, lf, lt) * 10) / 10, unit: lt });
+    }
     if (!MASS_METRICS[m.type]) return m;
     var to = U.prefUnit(), from = m.unit === 'kg' ? 'kg' : 'lb';
     if (from === to) return m;
@@ -3343,7 +3358,7 @@ AC.stats = (function () {
   return {
     prsFor: prsFor, plannedSets: plannedSets, platesFor: platesFor, plateText: plateText, warmupsFor: warmupsFor, liftHistory: liftHistory,
     epley: epley, setE1rm: setE1rm, sessionBest: sessionBest, e1rmSeries: e1rmSeries,
-    metricsOfType: metricsOfType, latest: latest, rolling7: rolling7, bodyweight7: bodyweight7,
+    metricsOfType: metricsOfType, inPrefUnit: inPrefUnit, latest: latest, rolling7: rolling7, bodyweight7: bodyweight7,
     weekAverage: weekAverage, daysTrainedThisWeek: daysTrainedThisWeek,
     setVolume: setVolume, sessionVolume: sessionVolume, weeklyVolume: weeklyVolume,
     setsByPattern: setsByPattern, lastFor: lastFor, stallCheck: stallCheck, sessionDay: sessionDay,
@@ -3390,7 +3405,7 @@ AC.engine = (function () {
   function setUnits(v) {
     v = v === 'kg' ? 'kg' : 'lb';
     AC.store.update(function (s) {
-      s.settings.loadUnit = v; s.settings.bodyweightUnit = v;
+      s.settings.loadUnit = v; s.settings.bodyweightUnit = v; s.settings.waistUnit = v === 'kg' ? 'cm' : 'in';
       var a = s.activeSession, b = a && a.block;
       if (!b) return;
       function conv(d) {
@@ -4719,7 +4734,7 @@ AC.report = (function () {
     var lastWaist = AC.stats.latest('waist');
     if (waist.length) {
       out.push('- Waist: ' + waist.map(function (m) { return num(m.value, 1) + ' ' + m.unit + ' (' + U.fmtDate(m.date) + ')'; }).join(', ') +
-        ' · target 30.5–31 in');
+        ' · target ' + (U.prefLength() === 'cm' ? '77.5–78.7 cm' : '30.5–31 in'));
     } else if (lastWaist) {
       out.push('- Waist: not measured this week (last: ' + num(lastWaist.value, 1) + ' ' + lastWaist.unit + ' on ' + U.fmtDate(lastWaist.date) + ')');
     }
@@ -5029,11 +5044,12 @@ AC.screens = (function () {
   function onboarding() {
     var el = screen({ nav: false });
     var unit = S().settings.loadUnit;
-    var weight = unit === 'kg' ? 90.6 : 199.7, waist = 32.3;
+    var lunit = unit === 'kg' ? 'cm' : 'in';
+    var weight = unit === 'kg' ? 90.6 : 199.7, waist = lunit === 'cm' ? 82 : 32.3;
     var wStep = ui.stepper({ label: 'Start weight', unit: unit, value: weight, step: unit === 'kg' ? 0.1 : 0.2, decimals: 1,
       min: unit === 'kg' ? 27 : 60, max: unit === 'kg' ? 230 : 500, onChange: function (v) { weight = v; } });
-    var waistStep = ui.stepper({ label: 'Waist at navel', unit: 'in', value: waist, step: 0.1, decimals: 1,
-      min: 15, max: 80, size: 'xs', onChange: function (v) { waist = v; } });
+    var waistStep = ui.stepper({ label: 'Waist at navel', unit: lunit, value: waist, step: lunit === 'cm' ? 0.5 : 0.1, decimals: 1,
+      min: lunit === 'cm' ? 38 : 15, max: lunit === 'cm' ? 203 : 80, size: 'xs', onChange: function (v) { waist = v; } });
     var seg = ui.segmented({ label: 'Units', value: unit, options: [{ id: 'lb', label: 'lb' }, { id: 'kg', label: 'kg' }],
       onChange: function (v) { unit = v; AC.engine.setUnits(v); render(); } });
     var prog = S().program;
@@ -5063,7 +5079,7 @@ AC.screens = (function () {
           s.onboarded = true;
           s.schedule.programStartDate = today;
           s.metrics.push({ id: U.uid('m'), date: today, type: 'weight', value: weight, unit: unit, source: 'manual' });
-          s.metrics.push({ id: U.uid('m'), date: today, type: 'waist', value: waist, unit: 'in', source: 'manual' });
+          s.metrics.push({ id: U.uid('m'), date: today, type: 'waist', value: waist, unit: lunit, source: 'manual' });
         });
         AC.router.go('home');
       }, 'primary'),
@@ -6655,7 +6671,7 @@ AC.screens = (function () {
     var all = progRange > 3000;
     var bits = [];
     var waist = AC.stats.metricsOfType('waist').filter(function (m) { return all || m.date >= xMin; });
-    if (waist.length > 1) { var dw = waist[waist.length - 1].value - waist[0].value; bits.push('Waist ' + (dw <= 0 ? '−' : '+') + U.num(Math.abs(dw), 1) + ' in'); }
+    if (waist.length > 1) { var dw = waist[waist.length - 1].value - waist[0].value; bits.push('Waist ' + (dw <= 0 ? '−' : '+') + U.num(Math.abs(dw), 1) + ' ' + U.prefLength()); }
     var roll = AC.stats.rolling7('weight').filter(function (r) { return (all || r.x >= xMin) && r.avg !== null; });
     if (roll.length > 7) {
       var d = roll[roll.length - 1].avg - roll[0].avg;
@@ -6809,8 +6825,10 @@ AC.screens = (function () {
     var lastWaist = AC.stats.latest('waist');
     var wa = lastWaist ? lastWaist.value : 32.3;
     if (!waistThisWeek) {
+      var cmU = st.settings.waistUnit === 'cm';
+      if (!lastWaist && cmU) wa = 82;
       var waStep = ui.stepper({ label: 'Waist at navel · due this week', unit: st.settings.waistUnit,
-        value: wa, step: 0.1, decimals: 1, min: 15, max: 80, size: 'sm', onChange: function (v) { wa = v; } });
+        value: wa, step: cmU ? 0.5 : 0.1, decimals: 1, min: cmU ? 38 : 15, max: cmU ? 203 : 80, size: 'sm', onChange: function (v) { wa = v; } });
       body.appendChild(h('div', { class: 'card stack-2' }, waStep,
         ui.btn('Save waist', function () {
           saveMetric('waist', wa, st.settings.waistUnit);
@@ -7005,16 +7023,21 @@ AC.screens = (function () {
       ? 'Your starting point for Phase ' + p.number + '. Weigh in fasted, measure the waist at the navel.'
       : 'Same spot, same light, phone at chest height.' }));
     function step(key, label, unit, min, max, stepv, optional) {
+      /* ranges and starting values below are in lb and inches; convert for kg and cm */
+      var conv = unit === 'kg' ? function (v) { return Math.round(U.massTo(v, 'lb', 'kg') * 10) / 10; }
+        : unit === 'cm' ? function (v) { return Math.round(v * 2.54 * 10) / 10; } : function (v) { return v; };
+      min = conv(min); max = conv(max);
+      if (unit === 'kg') stepv = 0.1; else if (unit === 'cm') stepv = 0.5;
       var has = typeof d[key] === 'number';
       var wrap = h('div', { class: 'stack-2' });
       if (optional && !has) {
         wrap.appendChild(h('button', { class: 'chip', type: 'button', text: '+ ' + label,
-          onclick: function () { var l = AC.stats.latest(key); d[key] = l ? l.value : (key === 'arm' ? 14 : key === 'chest' ? 40 : key === 'thigh' ? 23 : 38); render(); } }));
+          onclick: function () { var l = AC.stats.latest(key); d[key] = l ? l.value : conv(key === 'arm' ? 14 : key === 'chest' ? 40 : key === 'thigh' ? 23 : 38); render(); } }));
         return wrap;
       }
-      wrap.appendChild(ui.stepper({ label: label + (optional ? ' (optional)' : ''), unit: unit, value: has ? d[key] : (key === 'weight' ? 199.7 : 32.3),
+      wrap.appendChild(ui.stepper({ label: label + (optional ? ' (optional)' : ''), unit: unit, value: has ? d[key] : conv(key === 'weight' ? 199.7 : 32.3),
         step: stepv, decimals: 1, min: min, max: max, size: optional ? 'xs' : 'sm', onChange: function (v) { d[key] = v; } }));
-      if (!has) d[key] = key === 'weight' ? 199.7 : 32.3;
+      if (!has) d[key] = conv(key === 'weight' ? 199.7 : 32.3);
       return wrap;
     }
     body.appendChild(h('div', { class: 'card stack-2' },
@@ -7113,10 +7136,14 @@ AC.screens = (function () {
     var ci = st.checkins.filter(function (c) { return c.id === run.startCheckinId; })[0];
     function inRun(m) { return m.date >= run.startDate && m.date <= end; }
     var rows = [];
-    [['weight', 'Weight', st.settings.bodyweightUnit], ['waist', 'Waist', st.settings.waistUnit], ['chest', 'Chest', st.settings.waistUnit],
-     ['arm', 'Arm', st.settings.waistUnit], ['thigh', 'Thigh', st.settings.waistUnit], ['hips', 'Hips', st.settings.waistUnit]].forEach(function (t) {
-      var ms = st.metrics.filter(function (m) { return m.type === t[0] && inRun(m); });
-      var start = ci && typeof ci[t[0]] === 'number' ? ci[t[0]] : (ms[0] ? ms[0].value : null);
+    var pl = U.prefLength();
+    [['weight', 'Weight', U.prefUnit()], ['waist', 'Waist', pl], ['chest', 'Chest', pl],
+     ['arm', 'Arm', pl], ['thigh', 'Thigh', pl], ['hips', 'Hips', pl]].forEach(function (t) {
+      var ms = st.metrics.filter(function (m) { return m.type === t[0] && inRun(m); }).map(AC.stats.inPrefUnit);
+      var civ = ci && typeof ci[t[0]] === 'number' ? (t[0] === 'weight'
+        ? Math.round(U.massTo(ci.weight, ci.weightUnit || 'lb') * 10) / 10
+        : Math.round(U.lengthTo(ci[t[0]], ci.waistUnit || 'in') * 10) / 10) : null;
+      var start = civ !== null ? civ : (ms[0] ? ms[0].value : null);
       var now = ms.length ? ms[ms.length - 1].value : null;
       if (start === null && now === null) return;
       rows.push({ type: t[0], label: t[1], unit: t[2], start: start, now: now });

@@ -2133,6 +2133,8 @@ console.log('\nV2-17  one unit everywhere, and volume counts both sides');
   }));
   eq('in kg, the 199.7 lb start weight reads 90.6 kg', [kg.weight.value, kg.weight.unit], [90.6, 'kg']);
   eq('a 50 lb dumbbell reads 22.7 kg', kg.mass, '22.7 kg');
+  const tape = await page.evaluate(() => { const w = AC.stats.latest('waist'); return [AC.store.get().settings.waistUnit, w.value, w.unit]; });
+  eq('kg also switches tape to cm: the 32.3 in start waist reads 82 cm', tape, ['cm', 82, 'cm']);
   eq('kettlebells step through the kg sizes', kg.bells, [24, 'kg']);
 
   await page.evaluate(() => AC.engine.setUnits('lb'));
