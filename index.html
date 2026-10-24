@@ -3034,12 +3034,12 @@ AC.stats = (function () {
       return U.isoWeekKey(sessionDay(s)) === wk;
     }).length;
   }
-  /* Loads are entered per dumbbell, and one-sided reps are per side, so volume
-     counts what both hands and both sides actually moved. */
+  /* Two-dumbbell lifts are logged as the total in both hands, so the load is
+     counted once; one-sided reps are per side, so those count both sides. */
   var PAIRED = { 'dumbbell-bench-press': 1, 'chest-supported-row': 1, 'bulgarian-split-squat': 1 };
   function loadMultiplier(ex) {
     if (!ex) return 1;
-    return (PAIRED[ex.id] ? 2 : 1) * (ex.unilateral ? 2 : 1);
+    return ex.unilateral ? 2 : 1;
   }
   function setVolume(set, bodyweightLb) {
     if (set.isWarmup) return 0;
@@ -3360,7 +3360,7 @@ AC.stats = (function () {
     epley: epley, setE1rm: setE1rm, sessionBest: sessionBest, e1rmSeries: e1rmSeries,
     metricsOfType: metricsOfType, inPrefUnit: inPrefUnit, latest: latest, rolling7: rolling7, bodyweight7: bodyweight7,
     weekAverage: weekAverage, daysTrainedThisWeek: daysTrainedThisWeek,
-    setVolume: setVolume, sessionVolume: sessionVolume, weeklyVolume: weeklyVolume,
+    setVolume: setVolume, sessionVolume: sessionVolume, PAIRED: PAIRED, weeklyVolume: weeklyVolume,
     setsByPattern: setsByPattern, lastFor: lastFor, stallCheck: stallCheck, sessionDay: sessionDay,
     weeklyReview: weeklyReview, nutritionSummary: nutritionSummary, nutritionWindow: nutritionWindow,
     onTarget: onTarget, beatLast: beatLast, completeSessions: completeSessions,
@@ -3388,10 +3388,13 @@ AC.engine = (function () {
     var s = S().settings;
     return s.loadUnit === 'kg' ? 'kg' : 'lb';
   }
-  function increment(loadType, unit) {
+  function increment(loadType, unit, exerciseId) {
     var lb = { barbell: 5, dumbbell: 5, cable: 5, 'weighted-bodyweight': 2.5, sled: 10 };
     var kg = { barbell: 2.5, dumbbell: 2, cable: 2.5, 'weighted-bodyweight': 1.25, sled: 5 };
-    return (unit === 'kg' ? kg : lb)[loadType] || null;
+    var inc = (unit === 'kg' ? kg : lb)[loadType] || null;
+    /* both dumbbells go up one step each, so the logged total moves twice as far */
+    if (inc && loadType === 'dumbbell' && exerciseId && AC.stats.PAIRED[exerciseId]) inc *= 2;
+    return inc;
   }
   /* Bells are listed in kg in Settings; in pounds they show the usual lb labels. */
   var KB_LB = { 4: 9, 6: 13, 8: 18, 10: 22, 12: 26, 14: 31, 16: 35, 18: 40, 20: 44, 22: 48, 24: 53,
@@ -3434,7 +3437,7 @@ AC.engine = (function () {
   /* ---------- load suggestion (spec 5.1) ---------- */
   function suggestLoad(slot, excludeSessionId) {
     var unit = unitFor(slot);
-    var inc = increment(slot.loadType, unit);
+    var inc = increment(slot.loadType, unit, slot.exerciseId);
     var out = { load: 0, unit: unit, suggested: false, reason: '', last: null, lastSets: null };
     var unloaded = slot.loadType === 'bodyweight' || slot.loadType === 'band' || slot.loadType === 'none';
     var prev = AC.stats.lastFor(slot.exerciseId, excludeSessionId);
@@ -5527,9 +5530,9 @@ AC.screens = (function () {
         snap: true, stepUp: AC.engine.kbUp, stepDown: AC.engine.kbDown,
         min: unit === 'kg' ? 4 : 9, max: unit === 'kg' ? 60 : 130, onChange: onChange, suggested: draft.suggested ? draft.load : undefined });
     }
-    var inc = AC.engine.increment(slot.loadType, unit) || 5;
+    var inc = AC.engine.increment(slot.loadType, unit, slot.exerciseId) || 5;
     var label = slot.loadType === 'weighted-bodyweight' ? 'Added load'
-      : slot.loadType === 'dumbbell' ? 'Load per dumbbell' : 'Load';
+      : slot.loadType === 'dumbbell' && AC.stats.PAIRED[slot.exerciseId] ? 'Load, both dumbbells' : 'Load';
     var plateLine = null;
     var change = onChange;
     if (slot.loadType === 'barbell') {

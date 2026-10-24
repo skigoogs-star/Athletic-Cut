@@ -2122,7 +2122,9 @@ console.log('\nV2-17  one unit everywhere, and volume counts both sides');
     const st = AC.stats, s = AC.store.get().sessions.find(x => x.id === 'mix');
     return s.entries.map(e => Math.round(st.setVolume(e, 200)));
   });
-  eq('volume: one bell × 12; one dumbbell × 10 × both sides; two dumbbells × 8', vol, [Math.round(24 * 2.20462 * 12), 1000, 800]);
+  eq('volume: one bell × 12; one dumbbell × 10 × both sides; the two-dumbbell total × 8', vol, [Math.round(24 * 2.20462 * 12), 1000, 400]);
+  const inc = await page.evaluate(() => [AC.engine.increment('dumbbell', 'lb', 'dumbbell-bench-press'), AC.engine.increment('dumbbell', 'lb', 'single-arm-dumbbell-row'), AC.engine.increment('dumbbell', 'kg', 'bulgarian-split-squat')]);
+  eq('two-dumbbell totals go up 10 lb (4 kg); a single dumbbell 5 lb', inc, [10, 5, 4]);
 
   await page.evaluate(() => AC.engine.setUnits('kg'));
   const kg = await page.evaluate(() => ({
@@ -2158,7 +2160,7 @@ console.log('\nV2-17  one unit everywhere, and volume counts both sides');
   const dIdx = await page.evaluate(() => AC.store.get().activeSession.blocks.findIndex(b => b.items.some(i => i.exerciseId === 'dumbbell-bench-press')));
   await page.evaluate(n => { for (let i = 0; i < n; i++) AC.engine.skipBlock(); AC.router.go('session'); }, dIdx);
   await page.waitForSelector('.runner');
-  ok('dumbbell loads are labelled per dumbbell', (await page.locator('text=/Load per dumbbell · lb/').count()) >= 1);
+  ok('two-dumbbell loads are labelled as the total', (await page.locator('text=/Load, both dumbbells · lb/').count()) >= 1);
   await page.evaluate(() => AC.engine.abandon());
   await ctx.close();
 }
